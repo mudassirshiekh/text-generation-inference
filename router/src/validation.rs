@@ -591,6 +591,31 @@ fn image_tokens(
 
             image_string
         }
+        Idefics3(config) => {
+            const FAKE: &str = "<fake_token_around_image>";
+            const IMAGE: &str = "<image>";
+
+            let max_size = config.vision_encoder_max_image_size;
+            let calc_splits = |dim: usize| ((dim as f64) / max_size as f64).ceil() as usize;
+
+            let num_splits = if height.max(width) > max_size {
+                Some((calc_splits(width), calc_splits(height)))
+            } else {
+                None
+            };
+
+            let num_splits_h = num_splits.map(|(_, h)| h).unwrap_or(1);
+            let image_repeat = IMAGE.repeat(config.image_seq_len);
+
+            if num_splits_h > 1 {
+                let row = format!("{FAKE}{image_repeat}{FAKE}\n");
+                let mut image_string = row.repeat(num_splits_h);
+                image_string.push_str(&format!("\n{FAKE}{image_repeat}{FAKE}"));
+                image_string
+            } else {
+                format!("{FAKE}{image_repeat}{FAKE}")
+            }
+        }
         Paligemma(config) => "<image>".repeat(config.get_number_of_features(height, width)),
         LlavaNext(config) => "<image>".repeat(config.get_number_of_features(height, width)),
         _ => unimplemented!("Images tokens are not supported for this model configuration"),
@@ -619,7 +644,7 @@ fn prepare_input(
     use Config::*;
     static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[\]\([^\)]*\)").unwrap());
     let (tokenizer_query, input_chunks) = match config {
-        Some(config @ (Idefics | Mllama | Idefics2(_) | Paligemma(_) | LlavaNext(_))) => {
+        Some(config @ (Idefics | Mllama | Idefics2(_) | Idefics3(_) | Paligemma(_) | LlavaNext(_))) => {
             let mut input_chunks = Vec::new();
             let mut tokenizer_query = String::with_capacity(inputs.len());
             let mut start = 0;
@@ -818,7 +843,7 @@ pub enum ValidationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Idefics2, PaliTextConfig, Paligemma};
+    use crate::config::{Idefics2, Idefics3, PaliTextConfig, Paligemma};
     use crate::default_parameters;
     use crate::tests::get_tokenizer;
 
@@ -1219,6 +1244,133 @@ mod tests {
                 .filter(|t| *t == "fake")
                 .count(),
             11
+        );
+    }
+
+    #[tokio::test]
+    async fn test_idefics2_image_tokens() {
+        let config = Config::Idefics3(Idefics3 {
+            vision_encoder_max_image_size: 100,
+            image_seq_len: 1,
+        });
+
+        let preprocessor_config = Some(&HubPreprocessorConfig::Idefics2Processor(
+            Idefics2Preprocessor {
+                do_image_splitting: true,
+            },
+        ));
+
+        let height = 100;
+        let width = 100;
+
+        let tokens = image_tokens(&config, preprocessor_config, height, width);
+
+        assert_eq!(
+            tokens,
+            "<fake_token_around_image><image><fake_token_around_image>"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_idefics3_image_tokens() {
+        let config = Config::Idefics3(Idefics3 {
+            vision_encoder_max_image_size: 980,
+            image_seq_len: 1,
+        });
+
+        let preprocessor_config = Some(&HubPreprocessorConfig::Idefics3Processor(
+            Idefics2Preprocessor {
+                do_image_splitting: true,
+            },
+        ));
+
+        let height = 100;
+        let width = 100;
+
+        let tokens = image_tokens(&config, preprocessor_config, height, width);
+
+        assert_eq!(
+            tokens,
+            "<fake_token_around_image><image><fake_token_around_image>"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_idefics3_correct_n_fake_tokens() {
+        let pixel_data = STANDARD.decode(PIXEL_GIF).unwrap();
+
+        let tokenizer = Some(get_tokenizer().await);
+
+        let max_best_of = 2;
+        let max_stop_sequence = 3;
+        let max_top_n_tokens = 4;
+        let max_input_length = 5;
+        let max_total_tokens = 6;
+        let disable_grammar_support = true;
+        let workers = 1;
+        let config = Config::Idefics3(Idefics3 {
+            vision_encoder_max_image_size: 100,
+            image_seq_len: 1,
+        });
+        let validation = Validation::new(
+            workers,
+            tokenizer,
+            Some(config),
+            Some(HubPreprocessorConfig::Idefics3Processor(
+                Idefics2Preprocessor {
+                    do_image_splitting: true,
+                },
+            )),
+            max_best_of,
+            max_stop_sequence,
+            max_top_n_tokens,
+            max_input_length,
+            max_total_tokens,
+            disable_grammar_support,
+        );
+
+        let (encoding, chunks) = match validation
+            .tokenize(
+                format!(
+                    "test![](data:image/gif;base64,{})![](data:image/gif;base64,{})",
+                    PIXEL_GIF, PIXEL_GIF
+                ),
+                None,
+            )
+            .await
+        {
+            Ok(Some((encoding, chunks))) => (encoding, chunks),
+            _ => panic!("Unexpected tokenization failure"),
+        };
+
+        assert!(
+            chunks
+                == vec![
+                    Chunk::Text("test".to_string()).into(),
+                    Chunk::Image(Image {
+                        data: pixel_data.clone(),
+                        mimetype: "image/gif".to_string()
+                    })
+                    .into(),
+                    Chunk::Image(Image {
+                        data: pixel_data.clone(),
+                        mimetype: "image/gif".to_string()
+                    })
+                    .into()
+                ],
+            "Failed to process images",
+        );
+
+        // Verify the number of fake tokens:
+        //
+        // - Two images, each surrounded/separated by a fake token tags = 4.
+        assert_eq!(
+            encoding
+                .get_tokens()
+                .iter()
+                .filter(|t| *t == "fake")
+                .count(),
+            4
         );
     }
 }
