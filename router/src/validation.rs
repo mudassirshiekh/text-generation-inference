@@ -594,27 +594,69 @@ fn image_tokens(
         Idefics3(config) => {
             const FAKE: &str = "<fake_token_around_image>";
             const IMAGE: &str = "<image>";
+            const GLOBAL_IMG: &str = "<global-img>";
 
-            let max_size = config.vision_encoder_max_image_size;
-            let calc_splits = |dim: usize| ((dim as f64) / max_size as f64).ceil() as usize;
+            let max_longest_edge_for_image_resize = config.get_max_longest_edge_for_image_resize();
 
-            let num_splits = if height.max(width) > max_size {
-                Some((calc_splits(width), calc_splits(height)))
+            // resize image if it is larger than max_longest_edge_for_image_resize keeping aspect ratio
+            let (height, width) = if height > max_longest_edge_for_image_resize
+                || width > max_longest_edge_for_image_resize
+            {
+                let aspect_ratio = height as f32 / width as f32;
+                if height > width {
+                    (
+                        max_longest_edge_for_image_resize,
+                        (max_longest_edge_for_image_resize as f32 / aspect_ratio) as usize,
+                    )
+                } else {
+                    (
+                        (max_longest_edge_for_image_resize as f32 * aspect_ratio) as usize,
+                        max_longest_edge_for_image_resize,
+                    )
+                }
             } else {
-                None
+                (height, width)
             };
 
-            let num_splits_h = num_splits.map(|(_, h)| h).unwrap_or(1);
-            let image_repeat = IMAGE.repeat(config.image_seq_len);
+            let image_seq_len = config.get_number_of_features();
+            let max_edge = config.get_max_longest_edge();
 
-            if num_splits_h > 1 {
-                let row = format!("{FAKE}{image_repeat}{FAKE}\n");
-                let mut image_string = row.repeat(num_splits_h);
-                image_string.push_str(&format!("\n{FAKE}{image_repeat}{FAKE}"));
-                image_string
+            let (image_rows, image_cols) = if height > max_edge || width > max_edge {
+                (
+                    (height as f32 / max_edge as f32).ceil() as usize,
+                    (width as f32 / max_edge as f32).ceil() as usize,
+                )
             } else {
-                format!("{FAKE}{image_repeat}{FAKE}")
+                (0, 0)
+            };
+
+            let mut image_string = String::new();
+
+            if image_rows == 0 && image_cols == 0 {
+                // Single image case
+                image_string.push_str(FAKE);
+                image_string.push_str(GLOBAL_IMG);
+                image_string.push_str(&IMAGE.repeat(image_seq_len));
+                image_string.push_str(FAKE);
+            } else {
+                // Split image case
+                for n_h in 0..image_rows {
+                    for n_w in 0..image_cols {
+                        image_string.push_str(FAKE);
+                        image_string.push_str(&format!("<row_{}_col_{}>", n_h + 1, n_w + 1));
+                        image_string.push_str(&IMAGE.repeat(image_seq_len));
+                    }
+                    image_string.push('\n');
+                }
+
+                image_string.push('\n');
+                image_string.push_str(FAKE);
+                image_string.push_str(GLOBAL_IMG);
+                image_string.push_str(&IMAGE.repeat(image_seq_len));
+                image_string.push_str(FAKE);
             }
+
+            image_string
         }
         Paligemma(config) => "<image>".repeat(config.get_number_of_features(height, width)),
         LlavaNext(config) => "<image>".repeat(config.get_number_of_features(height, width)),
@@ -1249,10 +1291,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_idefics2_image_tokens() {
-        let config = Config::Idefics3(Idefics3 {
-            vision_encoder_max_image_size: 100,
-            image_seq_len: 1,
-        });
+        let config = Config::Idefics3(Idefics3 {});
 
         let preprocessor_config = Some(&HubPreprocessorConfig::Idefics2Processor(
             Idefics2Preprocessor {
@@ -1260,117 +1299,34 @@ mod tests {
             },
         ));
 
-        let height = 100;
-        let width = 100;
+        let height = 1067;
+        let width = 1600;
 
         let tokens = image_tokens(&config, preprocessor_config, height, width);
 
-        assert_eq!(
-            tokens,
-            "<fake_token_around_image><image><fake_token_around_image>"
-        );
-    }
+        // get all unique tags `<tag>` from the tokens
+        let tags: std::collections::HashSet<&str> = tokens
+            .split(|c| c == '<' || c == '>')
+            .filter(|s| !s.is_empty())
+            .collect();
 
-    #[tokio::test]
-    async fn test_idefics3_image_tokens() {
-        let config = Config::Idefics3(Idefics3 {
-            vision_encoder_max_image_size: 980,
-            image_seq_len: 1,
-        });
+        assert_eq!(tags.len(), 17); // all below and `\n` and `\n\n`
+        assert_eq!(tags.contains(&"row_1_col_1"), true);
+        assert_eq!(tags.contains(&"row_1_col_2"), true);
+        assert_eq!(tags.contains(&"row_1_col_3"), true);
+        assert_eq!(tags.contains(&"row_1_col_4"), true);
+        assert_eq!(tags.contains(&"row_2_col_1"), true);
+        assert_eq!(tags.contains(&"row_2_col_2"), true);
+        assert_eq!(tags.contains(&"row_2_col_3"), true);
+        assert_eq!(tags.contains(&"row_2_col_4"), true);
+        assert_eq!(tags.contains(&"row_3_col_1"), true);
+        assert_eq!(tags.contains(&"row_3_col_2"), true);
+        assert_eq!(tags.contains(&"row_3_col_3"), true);
+        assert_eq!(tags.contains(&"row_3_col_4"), true);
+        assert_eq!(tags.contains(&"global-img"), true);
+        assert_eq!(tags.contains(&"image"), true);
+        assert_eq!(tags.contains(&"fake_token_around_image"), true);
 
-        let preprocessor_config = Some(&HubPreprocessorConfig::Idefics3Processor(
-            Idefics2Preprocessor {
-                do_image_splitting: true,
-            },
-        ));
-
-        let height = 100;
-        let width = 100;
-
-        let tokens = image_tokens(&config, preprocessor_config, height, width);
-
-        assert_eq!(
-            tokens,
-            "<fake_token_around_image><image><fake_token_around_image>"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_idefics3_correct_n_fake_tokens() {
-        let pixel_data = STANDARD.decode(PIXEL_GIF).unwrap();
-
-        let tokenizer = Some(get_tokenizer().await);
-
-        let max_best_of = 2;
-        let max_stop_sequence = 3;
-        let max_top_n_tokens = 4;
-        let max_input_length = 5;
-        let max_total_tokens = 6;
-        let disable_grammar_support = true;
-        let workers = 1;
-        let config = Config::Idefics3(Idefics3 {
-            vision_encoder_max_image_size: 100,
-            image_seq_len: 1,
-        });
-        let validation = Validation::new(
-            workers,
-            tokenizer,
-            Some(config),
-            Some(HubPreprocessorConfig::Idefics3Processor(
-                Idefics2Preprocessor {
-                    do_image_splitting: true,
-                },
-            )),
-            max_best_of,
-            max_stop_sequence,
-            max_top_n_tokens,
-            max_input_length,
-            max_total_tokens,
-            disable_grammar_support,
-        );
-
-        let (encoding, chunks) = match validation
-            .tokenize(
-                format!(
-                    "test![](data:image/gif;base64,{})![](data:image/gif;base64,{})",
-                    PIXEL_GIF, PIXEL_GIF
-                ),
-                None,
-            )
-            .await
-        {
-            Ok(Some((encoding, chunks))) => (encoding, chunks),
-            _ => panic!("Unexpected tokenization failure"),
-        };
-
-        assert!(
-            chunks
-                == vec![
-                    Chunk::Text("test".to_string()).into(),
-                    Chunk::Image(Image {
-                        data: pixel_data.clone(),
-                        mimetype: "image/gif".to_string()
-                    })
-                    .into(),
-                    Chunk::Image(Image {
-                        data: pixel_data.clone(),
-                        mimetype: "image/gif".to_string()
-                    })
-                    .into()
-                ],
-            "Failed to process images",
-        );
-
-        // Verify the number of fake tokens:
-        //
-        // - Two images, each surrounded/separated by a fake token tags = 4.
-        assert_eq!(
-            encoding
-                .get_tokens()
-                .iter()
-                .filter(|t| *t == "fake")
-                .count(),
-            4
-        );
+        assert_eq!(tokens.len(), 15_901)
     }
 }
