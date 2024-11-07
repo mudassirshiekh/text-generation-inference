@@ -2525,6 +2525,7 @@ pub enum WebServerError {
 
 type PreparedInput = (String, Option<GrammarType>, bool);
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_chat_input(
     infer: &Infer,
     response_format: Option<GrammarType>,
@@ -2533,6 +2534,7 @@ pub(crate) fn prepare_chat_input(
     tool_prompt: &str,
     guideline: Option<String>,
     messages: Vec<Message>,
+    continue_final_message: bool,
 ) -> Result<PreparedInput, InferError> {
     if response_format.is_some() && tools.is_some() {
         return Err(InferError::ToolError(
@@ -2542,7 +2544,8 @@ pub(crate) fn prepare_chat_input(
 
     // when response_format is set, tools are not included when applying the chat template to generate inputs
     if let Some(format) = response_format {
-        let inputs = infer.apply_chat_template(guideline, messages, None)?;
+        let inputs =
+            infer.apply_chat_template(guideline, continue_final_message, messages, None)?;
         return Ok((inputs, Some(format), false));
     }
 
@@ -2557,6 +2560,7 @@ pub(crate) fn prepare_chat_input(
 
         let inputs: String = infer.apply_chat_template(
             guideline,
+            continue_final_message,
             messages,
             Some((updated_tools, tool_prompt.into())),
         )?;
@@ -2564,7 +2568,7 @@ pub(crate) fn prepare_chat_input(
     }
 
     // if no response_format or tools are set simply apply the chat template to generate inputs
-    let inputs = infer.apply_chat_template(guideline, messages, None)?;
+    let inputs = infer.apply_chat_template(guideline, continue_final_message, messages, None)?;
     Ok((inputs, None, false))
 }
 
@@ -2662,6 +2666,7 @@ mod tests {
                 "What is the weather like in New York?".to_string(),
             ),
         }];
+        let continue_final_message = false;
 
         let result = prepare_chat_input(
             &infer,
@@ -2671,6 +2676,7 @@ mod tests {
             tool_prompt,
             guideline,
             messages,
+            continue_final_message,
         );
 
         assert!(result.is_ok());

@@ -917,6 +917,11 @@ pub(crate) struct ChatRequest {
     #[serde(default)]
     #[schema(nullable = true, example = "null")]
     pub stream_options: Option<StreamOptions>,
+
+    /// Whether to continue the final message in the next request.
+    #[serde(default)]
+    #[schema(default = "false", example = true)]
+    pub continue_final_message: bool,
 }
 
 impl ChatRequest {
@@ -938,6 +943,7 @@ impl ChatRequest {
             frequency_penalty,
             top_p,
             top_logprobs,
+            continue_final_message,
             ..
         } = self;
 
@@ -960,6 +966,7 @@ impl ChatRequest {
             &tool_prompt,
             guideline,
             messages,
+            continue_final_message,
         )?;
 
         Ok((
