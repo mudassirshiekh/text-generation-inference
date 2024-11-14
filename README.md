@@ -19,6 +19,7 @@ to power Hugging Chat, the Inference API and Inference Endpoint.
 </div>
 
 ## Table of contents
+## By Mudassir Alam
 
   - [Get Started](#get-started)
     - [Docker](#docker)
